@@ -1,15 +1,30 @@
 import streamlit as st
 import json
 import os
-from serpapi import GoogleSearch 
-from agno.agent import Agent
-from agno.tools.serpapi import SerpApiTools
-from agno.models.google import Gemini
+from serpapi import GoogleSearch
 from datetime import datetime
+import google.generativeai as genai
+from dotenv import dotenv_values
 
-import streamlit as st
+# --- CrewAI Imports ---
+from crewai import Agent, Task, Crew, Process, LLM
+from crewai_tools import SerperDevTool
 
-# Set up Streamlit UI with a travel-friendly theme
+# Setting API Keys
+config = dotenv_values(".env")
+SERPAPI_KEY = config["SERPAPI_KEY"]
+GOOGLE_API_KEY = config["GEMINI_API_KEY"]
+# os.environ['SERPER_API_KEY'] = config["SERPAPI_KEY"]
+os.environ['SERPER_API_KEY'] = config["SERPERDEV_API_KEY"]
+# os.environ["OPENAI_API_KEY"] = "sk-..."  # CrewAI uses OpenAI by default, you can configure to use Gemini
+
+# Configuring Gemini
+my_llm = LLM(
+              model='gemini/gemini-2.5-flash',
+              api_key=GOOGLE_API_KEY
+            )
+
+# Streamlit UI Setup
 st.set_page_config(page_title="🌍 AI Travel Planner", layout="wide")
 st.markdown(
     """
@@ -41,8 +56,8 @@ st.markdown('<p class="subtitle">Plan your dream trip with AI! Get personalized 
 
 # User Inputs Section
 st.markdown("### 🌍 Where are you headed?")
-source = st.text_input("🛫 Departure City (IATA Code):", "BOM")  # Example: BOM for Mumbai
-destination = st.text_input("🛬 Destination (IATA Code):", "DEL")  # Example: DEL for Delhi
+source = st.text_input("🛫 Departure City (IATA Code):", "BOM")
+destination = st.text_input("🛬 Destination (IATA Code):", "DEL")
 
 st.markdown("### 📅 Plan Your Adventure")
 num_days = st.slider("🕒 Trip Duration (days):", 1, 14, 5)
@@ -51,7 +66,7 @@ travel_theme = st.selectbox(
     ["💑 Couple Getaway", "👨‍👩‍👧‍👦 Family Vacation", "🏔️ Adventure Trip", "🧳 Solo Exploration"]
 )
 
-# Divider for aesthetics
+# Divider
 st.markdown("---")
 
 st.markdown(
@@ -73,7 +88,7 @@ st.markdown(
 def format_datetime(iso_string):
     try:
         dt = datetime.strptime(iso_string, "%Y-%m-%d %H:%M")
-        return dt.strftime("%b-%d, %Y | %I:%M %p")  # Example: Mar-06, 2025 | 6:20 PM
+        return dt.strftime("%b-%d, %Y | %I:%M %p")
     except:
         return "N/A"
 
@@ -88,13 +103,10 @@ return_date = st.date_input("Return Date")
 # Sidebar Setup
 st.sidebar.title("🌎 Travel Assistant")
 st.sidebar.subheader("Personalize Your Trip")
-
-# Travel Preferences
 budget = st.sidebar.radio("💰 Budget Preference:", ["Economy", "Standard", "Luxury"])
 flight_class = st.sidebar.radio("✈️ Flight Class:", ["Economy", "Business", "First Class"])
 hotel_rating = st.sidebar.selectbox("🏨 Preferred Hotel Rating:", ["Any", "3⭐", "4⭐", "5⭐"])
 
-# Packing Checklist
 st.sidebar.subheader("🎒 Packing Checklist")
 packing_list = {
     "👕 Clothes": True,
@@ -106,15 +118,11 @@ packing_list = {
 for item, checked in packing_list.items():
     st.sidebar.checkbox(item, value=checked)
 
-# Travel Essentials
 st.sidebar.subheader("🛂 Travel Essentials")
 visa_required = st.sidebar.checkbox("🛃 Check Visa Requirements")
 travel_insurance = st.sidebar.checkbox("🛡️ Get Travel Insurance")
 currency_converter = st.sidebar.checkbox("💱 Currency Exchange Rates")
 
-SERPAPI_KEY = ""
-GOOGLE_API_KEY = ""
-os.environ["GOOGLE_API_KEY"] = GOOGLE_API_KEY
 
 params = {
         "engine": "google_flights",
@@ -127,10 +135,10 @@ params = {
         "api_key": SERPAPI_KEY
     }
 
-# Function to fetch flight data
+# Function to fetch flight data (remains the same)
 def fetch_flights(source, destination, departure_date, return_date):
     params = {
-        "engine": "google_flights",
+        "engine": "Google Flights",
         "departure_id": source,
         "arrival_id": destination,
         "outbound_date": str(departure_date),
@@ -143,85 +151,123 @@ def fetch_flights(source, destination, departure_date, return_date):
     results = search.get_dict()
     return results
 
-# Function to extract top 3 cheapest flights
 def extract_cheapest_flights(flight_data):
     best_flights = flight_data.get("best_flights", [])
-    sorted_flights = sorted(best_flights, key=lambda x: x.get("price", float("inf")))[:3]  # Get top 3 cheapest
+    sorted_flights = sorted(best_flights, key=lambda x: x.get("price", float("inf")))[:3]
     return sorted_flights
 
-# AI Agents
-researcher = Agent(
-    name="Researcher",
-    instructions=[
-        "Identify the travel destination specified by the user.",
-        "Gather detailed information on the destination, including climate, culture, and safety tips.",
-        "Find popular attractions, landmarks, and must-visit places.",
-        "Search for activities that match the user’s interests and travel style.",
-        "Prioritize information from reliable sources and official travel guides.",
-        "Provide well-structured summaries with key insights and recommendations."
-    ],
-    model=Gemini(id="gemini-2.0-flash-exp"),
-    tools=[SerpApiTools(api_key=SERPAPI_KEY)],
-    add_datetime_to_instructions=True,
+# --- CrewAI Agent and Task Definitions ---
+search_tool = SerperDevTool()
+
+# Define the agents
+researcher_agent = Agent(
+    role='Travel Researcher',
+    goal=f"Gather comprehensive information on {destination} for a {num_days}-day {travel_theme} trip.",
+    backstory=(
+        "An expert travel analyst who specializes in finding detailed information "
+        "about destinations, including climate, culture, popular attractions, and safety tips."
+    ),
+    llm = my_llm,
+    tools=[search_tool],
+    verbose=True,
+    allow_delegation=False
 )
 
-planner = Agent(
-    name="Planner",
-    instructions=[
-        "Gather details about the user's travel preferences and budget.",
-        "Create a detailed itinerary with scheduled activities and estimated costs.",
-        "Ensure the itinerary includes transportation options and travel time estimates.",
-        "Optimize the schedule for convenience and enjoyment.",
-        "Present the itinerary in a structured format."
-    ],
-    model=Gemini(id="gemini-2.0-flash-exp"),
-    add_datetime_to_instructions=True,
+planner_agent = Agent(
+    role='Itinerary Planner',
+    goal=f"Create a personalized, detailed {num_days}-day itinerary for the trip to {destination}.",
+    backstory=(
+        "A meticulous planner who excels at crafting day-by-day travel plans, "
+        "including activities, timings, and transportation options, tailored to user preferences."
+    ),
+    llm = my_llm,
+    verbose=True,
+    allow_delegation=False
 )
 
-hotel_restaurant_finder = Agent(
-    name="Hotel & Restaurant Finder",
-    instructions=[
-        "Identify key locations in the user's travel itinerary.",
-        "Search for highly rated hotels near those locations.",
-        "Search for top-rated restaurants based on cuisine preferences and proximity.",
-        "Prioritize results based on user preferences, ratings, and availability.",
-        "Provide direct booking links or reservation options where possible."
-    ],
-    model=Gemini(id="gemini-2.0-flash-exp"),
-    tools=[SerpApiTools(api_key=SERPAPI_KEY)],
-    add_datetime_to_instructions=True,
+hotel_restaurant_finder_agent = Agent(
+    role='Accommodation and Dining Expert',
+    goal=f"Find the best hotels and restaurants in {destination} based on user preferences.",
+    backstory=(
+        "A seasoned concierge who knows the best places to stay and eat. They prioritize "
+        "high ratings, proximity to attractions, and alignment with the user's budget and theme."
+    ),
+    llm = my_llm,
+    tools=[search_tool],
+    verbose=True,
+    allow_delegation=False
 )
 
-# Generate Travel Plan
+# Define the tasks
+research_task = Task(
+    description=(
+        f"1. Search for popular attractions, landmarks, and must-visit places in {destination}.\n"
+        f"2. Research activities that match the traveler's interests: {activity_preferences}.\n"
+        f"3. Find information on the local climate and culture.\n"
+        f"4. Provide a well-structured summary of the findings.\n"
+        f"Ensure the information is relevant for a {travel_theme.lower()} trip."
+    ),
+    agent=researcher_agent,
+    expected_output=(
+        f"A detailed markdown report with sections for 'Top Attractions', 'Local Activities', "
+        f"'Climate & Culture', and 'Safety Tips' for {destination}. The output should be "
+        f"easy to read and directly usable for itinerary planning."
+    )
+)
+
+hotel_restaurant_task = Task(
+    description=(
+        f"1. Identify the top-rated hotels in {destination} that match the user's preferences: "
+        f"Budget: {budget}, Hotel Rating: {hotel_rating}.\n"
+        f"2. Find highly-rated restaurants near the main attractions, considering the traveler's theme: "
+        f"{travel_theme}.\n"
+        f"3. Provide a list of options for both, including ratings and a brief description."
+    ),
+    agent=hotel_restaurant_finder_agent,
+    expected_output=(
+        f"A list of 3-5 top hotel recommendations and 3-5 top restaurant recommendations for {destination}. "
+        f"Each recommendation should include the name, star rating, a brief description, and its approximate location."
+    )
+)
+
+planning_task = Task(
+    description=(
+        f"Create a detailed, day-by-day itinerary for a {num_days}-day trip to {destination}. "
+        f"The plan should incorporate the research findings from the 'Travel Researcher' and the hotel/restaurant "
+        f"recommendations from the 'Accommodation and Dining Expert'.\n"
+        f"Consider the traveler's preferences: Theme: {travel_theme}, Activities: {activity_preferences}, "
+        f"Budget: {budget}.\n"
+        f"The itinerary should include scheduled activities, estimated travel times, and suggestions for meals."
+    ),
+    agent=planner_agent,
+    expected_output=(
+        f"A complete, structured travel itinerary for a {num_days}-day trip to {destination}. "
+        f"The output should be formatted clearly with headings for each day, listing morning, "
+        f"afternoon, and evening activities, and incorporating flight details and hotel/restaurant suggestions."
+    )
+)
+
+# --- Streamlit Execution Logic ---
 if st.button("🚀 Generate Travel Plan"):
+    # Flight fetching (remains the same)
     with st.spinner("✈️ Fetching best flight options..."):
         flight_data = fetch_flights(source, destination, departure_date, return_date)
         cheapest_flights = extract_cheapest_flights(flight_data)
 
-    # AI Processing
-    with st.spinner("🔍 Researching best attractions & activities..."):
-        research_prompt = (
-            f"Research the best attractions and activities in {destination} for a {num_days}-day {travel_theme.lower()} trip. "
-            f"The traveler enjoys: {activity_preferences}. Budget: {budget}. Flight Class: {flight_class}. "
-            f"Hotel Rating: {hotel_rating}. Visa Requirement: {visa_required}. Travel Insurance: {travel_insurance}."
-        )
-        research_results = researcher.run(research_prompt, stream=False)
+    # Initialize the Crew
+    # The crew will execute tasks in the order provided.
+    project_crew = Crew(
+        agents=[researcher_agent, hotel_restaurant_finder_agent, planner_agent],
+        tasks=[research_task, hotel_restaurant_task, planning_task],
+        verbose=True, # You can change this to 1 or 0 for less output
+        process=Process.sequential # Executes tasks one after the other
+    )
 
-    with st.spinner("🏨 Searching for hotels & restaurants..."):
-        hotel_restaurant_prompt = (
-            f"Find the best hotels and restaurants near popular attractions in {destination} for a {travel_theme.lower()} trip. "
-            f"Budget: {budget}. Hotel Rating: {hotel_rating}. Preferred activities: {activity_preferences}."
-        )
-        hotel_restaurant_results = hotel_restaurant_finder.run(hotel_restaurant_prompt, stream=False)
-
-    with st.spinner("🗺️ Creating your personalized itinerary..."):
-        planning_prompt = (
-            f"Based on the following data, create a {num_days}-day itinerary for a {travel_theme.lower()} trip to {destination}. "
-            f"The traveler enjoys: {activity_preferences}. Budget: {budget}. Flight Class: {flight_class}. Hotel Rating: {hotel_rating}. "
-            f"Visa Requirement: {visa_required}. Travel Insurance: {travel_insurance}. Research: {research_results.content}. "
-            f"Flights: {json.dumps(cheapest_flights)}. Hotels & Restaurants: {hotel_restaurant_results.content}."
-        )
-        itinerary = planner.run(planning_prompt, stream=False)
+    # Start the crew's work
+    with st.spinner("✨ Creating your personalized travel plan with AI..."):
+        # The kick-off method will run all tasks and return the final result of the last task (the itinerary).
+        crew_result = project_crew.kickoff()
+        itinerary_output = crew_result
 
     # Display Results
     st.subheader("✈️ Cheapest Flight Options")
@@ -237,26 +283,13 @@ if st.button("🚀 Generate Travel Plan"):
                 flights_info = flight.get("flights", [{}])
                 departure = flights_info[0].get("departure_airport", {})
                 arrival = flights_info[-1].get("arrival_airport", {})
-                airline_name = flights_info[0].get("airline", "Unknown Airline") 
+                airline_name = flights_info[0].get("airline", "Unknown Airline")
                 
                 departure_time = format_datetime(departure.get("time", "N/A"))
                 arrival_time = format_datetime(arrival.get("time", "N/A"))
                 
-                departure_token = flight.get("departure_token", "")
+                booking_link = "#" # Placeholder for booking link logic
 
-                if departure_token:
-                    params_with_token = {
-                        **params,
-                        "departure_token": departure_token  # Add the token here
-                    }
-                    search_with_token = GoogleSearch(params_with_token)
-                    results_with_booking = search_with_token.get_dict()
-
-                    booking_options = results_with_booking['best_flights'][idx]['booking_token']
-
-                booking_link = f"https://www.google.com/travel/flights?tfs="+booking_options if booking_options else "#"
-                print(booking_link)
-                # Flight card layout
                 st.markdown(
                     f"""
                     <div style="
@@ -292,10 +325,8 @@ if st.button("🚀 Generate Travel Plan"):
     else:
         st.warning("⚠️ No flight data available.")
 
-    st.subheader("🏨 Hotels & Restaurants")
-    st.write(hotel_restaurant_results.content)
-
     st.subheader("🗺️ Your Personalized Itinerary")
-    st.write(itinerary.content)
+    # CrewAI's kickoff returns the final output directly
+    st.write(itinerary_output)
 
     st.success("✅ Travel plan generated successfully!")
